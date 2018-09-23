@@ -1,8 +1,9 @@
 ---
 title: "HW2 STA521 Fall18"
-author: '[Your Name Here, netid and github username here]'
+author: "James Wang, cw261, jameswang1997"
 date: "Due September 23, 2018 5pm"
 output:
+  word_document: default
   pdf_document: default
   html_document:
     df_print: paged
@@ -24,24 +25,32 @@ This exercise involves the UN data set from `alr3` package. Install `alr3` and t
 
 0.  Preliminary read in the data.  After testing, modify the code chunk so that output, messages and warnings are suppressed.  *Exclude text from final*
 
-```{r data}
+```{r data, result = 'hide', include = F}
 library(alr3)
 data(UN3, package="alr3")
-help(UN3) 
 library(car)
+library(dplyr)
+library(stringr)
+library(knitr)
+library(GGally)
+library(mice)
 ```
 
 
 1. Create a summary of the data.  How many variables have missing data?  Which are quantitative and which are qualtitative?
 
 ```{r}
-
+UN3 %>% summary() %>% kable
 ```
+Purban is the only variable that doesn't have missing data 
+All of the variables are quantative 
 
 2. What is the mean and standard deviation of each quantitative predictor?  Provide in a nicely formatted table.
 
 ```{r}
-
+t1 = sapply(UN3, function(col) c(mean(col, na.rm = T), sd(col, na.rm = T))) %>% t()
+colnames(t1) = c('mean', 'std')
+t1 %>% kable()
 ```
 
 
@@ -49,70 +58,168 @@ library(car)
 highlighting the relationships among the predictors. Comment
 on your findings regarding trying to predict `ModernC` from the other variables.  Are there potential outliers, nonlinear relationships or transformations that appear to be needed based on your graphical EDA?
 
-```{r}
 
+```{r, warning = F, message=F, results = 'hide', fig.width= 8}
+X_col = names(UN3)[2:ncol(UN3)]
+UN3 %>% ggpairs( columns = c(X_col, 'ModernC') )
 ```
+Strong Correlation with ModernC: Change (-), PPgdp, Fertility (-), Purban
+Note: fertity has a high correlation with Change, and PUrban
+
+
+Outlier / log might needed: Pop 
+After log(pop), the scatter plot looks better
+```{r}
+plot(UN3$ModernC, log(UN3$Pop))
+```
+
 
 ## Model Fitting
 
 4.  Use the `lm()` function to perform a multiple linear regression with `ModernC` as the response and all other variables as the predictors, using the formula `ModernC ~ .`, where the `.` includes all remaining variables in the dataframe.  Create  diagnostic residual plot from the linear model object and comment on results regarding assumptions.  How many observations are used in your model fitting?
 
 ```{r}
-
+fit1 = lm(
+  ModernC ~ . , 
+  data = UN3
+)
+par(mfrow = c(2,2))
+plot(fit1)
 ```
+Model Assumptions:
+Linearity: some outlier for big counties skew the result to right (leverage but not enough to be influential pts)
+Independence: countries are pretty randomly scattered
+Normailty: curving at both ends (might need log y)
+Constant variance: generally true
+
+```{r}
+a = summary(fit1) 
+a$df
+a$df[2] + a$df[3] 
+```
+(85 observations deleted due to missingness)
+So the N used in the model is 118 df + 6 predictor + 1 intercept = 125
+
+
 
 5. Examine added variable plots `car::avPlot` or `car::avPlots`  for your model above. Are there any plots that suggest that transformations are needed for any of the terms in the model? Describe. Is it likely that any of the localities are influential for any of the terms?  Which localities?  Which terms?  
 
-```{r}
 
+```{r}
+avPlots(fit1)
 ```
+These added varible plots show that Change, Fertility, and PPgdp have linear relationship with ModernC. Pop does too but needs to be logged. Frate and Purhan show a less clear linear relationship
+
 
 6.  Using the Box-Tidwell  `car::boxTidwell` or graphical methods find appropriate transformations of the predictor variables to be used as predictors in the linear model.  If any predictors are negative, you may need to transform so that they are non-negative.  Describe your method and  the resulting transformations.
 
+First, use Multivariate Imputation by Chained Equations to impute NAs
+```{r, warning = F, message=F, results='hide'}
+imp = mice(UN3)
+UN_imp = complete(imp)
+```
 
 ```{r}
+# center shift transform for Change to make all Change_i non negative 
+
+UN_imp = UN_imp %>% mutate(Change1 = Change + abs(min(Change)) + 1,
+                           Pop1 = Pop, 
+                           Frate1 = Frate + 10,
+                           Purban1 = Purban/100)
+
+# pop and frate doesn't work without log
+bt = car::boxTidwell(ModernC ~ Change1 + PPgdp + Fertility + Pop + Frate + Purban, data = UN_imp)
+bt # we shall log change
 
 ```
 
 7. Given the selected transformations of the predictors, select a transformation of the response using `MASS::boxcox` or `car::boxCox` and justify.
 
+mean lambda is more toward 1 than 0, around .6. The transformation on y did not significantly improve the model. The diagnostic plots show a handful of datapoints are not explained by the transformed model. I decide not to do any transform on y
+```{r}
+with(UN_imp, car::boxCox(ModernC ~ log(Change1) + PPgdp + Fertility + Purban + Pop))
+lambda1 = powerTransform( ModernC ~ log(Change1) + PPgdp + Fertility + Purban + Pop, data = UN_imp)[['roundlam']] 
+```
 
 ```{r}
-
+fit_tran = glm( (ModernC^lambda1 -1) / ModernC ~ log(Change1) + PPgdp + Fertility + Purban + Pop, data = UN_imp)
+par(mfrow = c(2,2))
+fit_tran %>% plot
 ```
+
 
 8.  Fit the regression using the transformed variables.  Provide residual plots and added variables plots and comment.  If you feel that you need additional transformations of either the response or predictors, repeat any steps until you feel satisfied.
 
-9. Start by finding the best transformation of the response and then find transformations of the predictors.  Do you end up with a different model than in 8?
+residual plot
+still not independent (constant var)
+I think need to log population
+```{r}
+fit2 = glm(ModernC ~ log(Change1) + PPgdp + Fertility + Purban + Pop, data = UN_imp, family = 'poisson')
+par(mfrow = c(2,2))
+fit2 %>% plot
+```
+```{r}
+fit3 = glm(ModernC ~ log(Change1) + PPgdp + Fertility + Purban + log(Pop),
+           data = UN_imp,
+           family = 'poisson')
+par(mfrow = c(2,2))
+fit3 %>% plot
+```
+avplot  
 
+linear correlation slightly stronger than before, still could be better
+```{r}
+avPlots(fit2)
+```
 
 ```{r}
+fit4 = step(fit3)
+# ModernC ~  log(Change1) + PPgdp + Fertility
+# stepwise variable selection shows we should take out Pop and Purban, which do not have strong correlation with Y
+par(mfrow = c(2,2))
+plot(fit4)
+```
+```{r}
+avPlots(fit4)
+```
+final model: ModernC =  B0 + B1 * log(Change1) + B2 * PPgdp + B3 * Fertility
 
+9. Start by finding the best transformation of the response and then find transformations of the predictors.  Do you end up with a different model than in 8?
+
+# since we get the same y decison (not transform), we end up with the same model
+```{r}
+a= with(UN_imp, car::boxCox(ModernC ~ Change1 + PPgdp + Fertility + Purban + Pop))
+powerTransform(ModernC ~ Change1 + PPgdp + Fertility + Purban + Pop,  data = UN_imp)
 ```
 
 10.  Are there any outliers or influential points in the data?  Explain.  If so, refit the model after removing any outliers and comment on residual plots.
 
 
 ```{r}
-
+# no influential points
+par(mfrow = c(2,2))
+plot(fit4)
 ```
 
 ## Summary of Results
 
 11. For your final model, provide summaries of coefficients with 95% confidence intervals in a nice table with interpretations of each coefficient.  These should be in terms of the original units! 
 
+```{r}
+cbind(OddRatio = fit4$coefficients, confint.default(fit4)) %>% kable
+```
 
 ```{r}
-
+cbind(OddRatio = fit4$coefficients, confint.default(fit4)) %>% exp() %>% kable
 ```
+$1 in 2001 GDP per capita would result in a non practically signifant ratio increase in percent of unmarried woman, given all else constant
+A one point increase in expected number of live birth per female would result in a decrease in percent of unmarried woman to a factor .641 of before, given all else constant
+If we increase Annual population growth rate by 1%, we would expect to see the percent of unmarried women increase by .666% 
 
 
 12. Provide a paragraph summarizing your final model  and findings suitable for the US envoy to the UN after adjusting for outliers or influential points.   You should provide a justification for any case deletions in your final model
 
-
-```{r}
-
-```
+The Percent of unmarried women using a modern method of contraception in each country has significant negative correlation with Fertility rate and positive correlation with Population Growth Rate, all else held constant. GDP/capital has a negligible positive correlations, while Urbanization rate, female percentage over 15, and population have no significant correlation. The missing data have been imputed with multivariate imputation. No case was deleted.  
 
 
 ## Methodology
